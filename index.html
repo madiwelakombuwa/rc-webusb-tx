@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,maximum-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>RC Control (WebUSB)</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body {
+  background: #191919; color: #FAFAF7;
+  font-family: -apple-system, system-ui, sans-serif;
+  margin: 0; padding: 12px;
+  user-select: none; -webkit-user-select: none;
+  -webkit-touch-callout: none; overflow: hidden;
+  height: 100vh;
+}
+h2 { color: #CC785C; text-align: center; margin: 8px 0 8px 0; letter-spacing: 2px; font-size: 20px; }
+.sub { text-align: center; color: #91918D; font-size: 11px; margin-bottom: 12px; letter-spacing: 1px; }
+.row { display: flex; justify-content: space-around; align-items: center; padding: 8px 0; }
+.stick {
+  width: 160px; height: 160px; border-radius: 50%;
+  background: #262625; border: 2px solid #40403E;
+  position: relative; touch-action: none;
+}
+.stick-label {
+  text-align: center; color: #91918D; font-size: 11px;
+  margin-bottom: 6px; letter-spacing: 1.5px;
+}
+.puck {
+  width: 64px; height: 64px; border-radius: 50%; background: #CC785C;
+  position: absolute; left: 48px; top: 48px;
+  box-shadow: 0 0 24px rgba(204,120,92,0.45);
+  transition: left 0.10s ease-out, top 0.10s ease-out;
+}
+.puck.active { transition: none; }
+.btn-row {
+  display: grid; grid-template-columns: 1fr 1fr 1fr 1fr;
+  gap: 6px; padding: 10px 0;
+}
+button {
+  background: #262625; color: #CC785C; border: 1px solid #CC785C;
+  padding: 10px 4px; border-radius: 8px; font-size: 12px; letter-spacing: 1px;
+  touch-action: manipulation; font-family: inherit;
+}
+button:active { background: #CC785C; color: #191919; }
+button:disabled { opacity: 0.35; border-color: #40403E; color: #91918D; }
+.connect {
+  width: 100%; padding: 16px; font-size: 16px; letter-spacing: 2px;
+  background: #CC785C; color: #191919; border: none; border-radius: 10px;
+  margin: 8px 0;
+}
+.connect.connected { background: #262625; color: #91918D; border: 1px solid #91918D; }
+.status {
+  text-align: center; padding: 8px; color: #91918D; font-size: 11px;
+  font-family: Menlo, monospace; line-height: 1.6;
+}
+.status .v { color: #FAFAF7; }
+.status .ok { color: #6FB07F; }
+.status .err { color: #BF4D43; }
+</style>
+</head>
+<body>
+<h2>RC CONTROL · WebUSB</h2>
+<div class="sub">Phone ⟶ USB-OTG ⟶ ESP32-C3 ⟶ PPM</div>
+
+<button id="connect" class="connect">CONNECT C3 VIA USB</button>
+
+<div class="row">
+  <div>
+    <div class="stick-label">THROTTLE</div>
+    <div id="tStick" class="stick"><div class="puck"></div></div>
+  </div>
+  <div>
+    <div class="stick-label">STEERING</div>
+    <div id="sStick" class="stick"><div class="puck"></div></div>
+  </div>
+</div>
+
+<div class="btn-row">
+  <button class="led" data-cmd="h" disabled>LED ON</button>
+  <button class="led" data-cmd="l" disabled>LED OFF</button>
+  <button class="led" data-cmd="t" disabled>TOGGLE</button>
+  <button class="led" data-cmd="b" disabled>BLINK</button>
+</div>
+
+<div class="status">
+  <div>t=<span class="v" id="dt">90</span>
+       &nbsp;s=<span class="v" id="ds">90</span>
+       &nbsp;pkt/s=<span class="v" id="rate">0</span></div>
+  <div id="state">tap "CONNECT C3 VIA USB" above</div>
+</div>
+
+<script>
+// ─── WebUSB connection ─────────────────────────────────────────────────────
+// C3 SuperMini enumerates as Espressif USB-Serial/JTAG.
+// VID 0x303a (Espressif), PID 0x1001 (ESP32-C3 native USB JTAG/Serial).
+const USB_FILTERS = [{ vendorId: 0x303a, productId: 0x1001 }];
+
+let device = null;
+let outEndpoint = null;
+let interfaceNumber = null;
+let pktCount = 0, pktCountLastSec = 0;
+
+const $ = (id) => document.getElementById(id);
+const setStatus = (text, cls = '') => {
+  const el = $('state');
+  el.textContent = text;
+  el.className = cls;
+};
+
+async function connect() {
+  if (!navigator.usb) {
+    setStatus('WebUSB not supported. Use Chrome on Android.', 'err'); return;
+  }
+  try {
+    device = await navigator.usb.requestDevice({ filters: USB_FILTERS });
+    await device.open();
+    if (device.configuration === null) await device.selectConfiguration(1);
+
+    // Find the CDC-Data interface and its bulk OUT endpoint.
+    // CDC Data class = 0x0A.
+    let cdcData = null;
+    for (const iface of device.configuration.interfaces) {
+      const alt = iface.alternates[0];
+      if (alt.interfaceClass === 0x0A) { cdcData = iface; break; }
+    }
+    // Fallback: take the LAST interface (CDC-Data is usually the last one on the C3 USB-CDC stack).
+    if (!cdcData) {
+      cdcData = device.configuration.interfaces[device.configuration.interfaces.length - 1];
+    }
+    interfaceNumber = cdcData.interfaceNumber;
+    await device.claimInterface(interfaceNumber);
+
+    const alt = cdcData.alternates[0];
+    for (const ep of alt.endpoints) {
+      if (ep.direction === 'out') { outEndpoint = ep.endpointNumber; break; }
+    }
+    if (!outEndpoint) throw new Error('no bulk OUT endpoint found on CDC-Data interface');
+
+    setStatus(`Connected · iface=${interfaceNumber} epOUT=${outEndpoint}`, 'ok');
+    $('connect').textContent = 'CONNECTED · TAP TO DISCONNECT';
+    $('connect').classList.add('connected');
+    document.querySelectorAll('button.led').forEach(b => b.disabled = false);
+
+    // Per-second packet rate counter
+    setInterval(() => {
+      $('rate').textContent = pktCount - pktCountLastSec;
+      pktCountLastSec = pktCount;
+    }, 1000);
+  } catch (e) {
+    setStatus('Connect failed: ' + e.message, 'err');
+    device = null;
+  }
+}
+
+async function disconnect() {
+  if (!device) return;
+  try {
+    if (interfaceNumber !== null) await device.releaseInterface(interfaceNumber);
+    await device.close();
+  } catch (e) { /* ignore */ }
+  device = null; outEndpoint = null; interfaceNumber = null;
+  setStatus('Disconnected', '');
+  $('connect').textContent = 'CONNECT C3 VIA USB';
+  $('connect').classList.remove('connected');
+  document.querySelectorAll('button.led').forEach(b => b.disabled = true);
+}
+
+$('connect').addEventListener('click', () => {
+  if (device) disconnect(); else connect();
+});
+
+// ─── Send helpers ─────────────────────────────────────────────────────────
+const encoder = new TextEncoder();
+async function sendLine(line) {
+  if (!device || !outEndpoint) return;
+  try {
+    await device.transferOut(outEndpoint, encoder.encode(line + '\n'));
+    pktCount++;
+  } catch (e) {
+    setStatus('TX err: ' + e.message, 'err');
+  }
+}
+
+// ─── Joysticks ────────────────────────────────────────────────────────────
+let throttleY = 0, steeringX = 0;
+function setupStick(id, mode) {
+  const j = $(id);
+  const puck = j.querySelector('.puck');
+  const max = 48;
+  let active = false;
+
+  const fromTouch = (e) => {
+    const r = j.getBoundingClientRect();
+    const t = e.touches ? e.touches[0] : e;
+    return [t.clientX - r.left - r.width/2, t.clientY - r.top - r.height/2];
+  };
+  function move(x, y) {
+    const m = Math.hypot(x, y);
+    if (m > max) { x *= max/m; y *= max/m; }
+    puck.style.left = (48 + x) + 'px';
+    puck.style.top  = (48 + y) + 'px';
+    if (mode === 'y') throttleY = -y / max;  // stick up = positive
+    else              steeringX =  x / max;
+  }
+  function reset() {
+    puck.classList.remove('active');
+    puck.style.left = '48px'; puck.style.top = '48px';
+    if (mode === 'y') throttleY = 0; else steeringX = 0;
+  }
+  const begin = (e) => { active = true; puck.classList.add('active'); const [x,y] = fromTouch(e); move(x,y); e.preventDefault && e.preventDefault(); };
+  const drag  = (e) => { if (!active) return; const [x,y] = fromTouch(e); move(x,y); e.preventDefault && e.preventDefault(); };
+  const end   = () => { active = false; reset(); };
+
+  j.addEventListener('touchstart', begin, { passive: false });
+  j.addEventListener('touchmove',  drag,  { passive: false });
+  j.addEventListener('touchend',   end,   { passive: false });
+  j.addEventListener('mousedown',  begin);
+  j.addEventListener('mousemove',  drag);
+  j.addEventListener('mouseup',    end);
+  j.addEventListener('mouseleave', end);
+}
+setupStick('tStick', 'y');
+setupStick('sStick', 'x');
+
+// ─── Control loop ─────────────────────────────────────────────────────────
+let lastSent = { t: -1, s: -1 };
+let lastSendMs = 0;
+setInterval(() => {
+  const t = Math.round(90 + throttleY * 90);
+  const s = Math.round(90 + steeringX * 90);
+  $('dt').textContent = t;
+  $('ds').textContent = s;
+  if (!device) return;
+  const now = performance.now();
+  const changed = (t !== lastSent.t) || (s !== lastSent.s);
+  // Send on change at up to ~50 Hz, OR heartbeat at 5 Hz
+  if ((changed && now - lastSendMs > 20) || now - lastSendMs > 200) {
+    sendLine(`${t} ${s}`);
+    lastSent = { t, s };
+    lastSendMs = now;
+  }
+}, 20);
+
+// ─── LED buttons ──────────────────────────────────────────────────────────
+document.querySelectorAll('button.led').forEach(b => {
+  b.addEventListener('click', () => sendLine(b.dataset.cmd));
+});
+</script>
+</body>
+</html>
