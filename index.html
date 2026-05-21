@@ -68,7 +68,8 @@ button:disabled { opacity: 0.35; border-color: #40403E; color: #91918D; }
 <div class="sub">Phone ⟶ USB-OTG ⟶ ESP32-C3 ⟶ PPM</div>
 
 <button id="connect" class="connect">CONNECT C3 SERIAL</button>
-<button id="probe" style="width:100%; background:#262625; color:#91918D; border:1px solid #40403E; padding:8px; border-radius:8px; font-size:11px; letter-spacing:1px; margin-bottom:8px;">DEBUG: WHAT DOES CHROME SEE?</button>
+<button id="probe" style="width:100%; background:#262625; color:#91918D; border:1px solid #40403E; padding:8px; border-radius:8px; font-size:11px; letter-spacing:1px; margin-bottom:4px;">DEBUG: WHAT DOES CHROME SEE?</button>
+<button id="probeUsb" style="width:100%; background:#262625; color:#91918D; border:1px solid #40403E; padding:8px; border-radius:8px; font-size:11px; letter-spacing:1px; margin-bottom:8px;">DEBUG: TRY WEBUSB PICKER</button>
 
 <div class="row">
   <div>
@@ -196,6 +197,28 @@ $('probe').addEventListener('click', async () => {
   setStatus(lines.join('\\n'));
   // Also render multi-line in the status box
   $('state').innerHTML = lines.join('<br>');
+});
+
+// WebUSB picker probe -- different code path than Web Serial; tells us
+// whether Android's USB stack sees the C3 at all.
+$('probeUsb').addEventListener('click', async () => {
+  if (!('usb' in navigator)) {
+    $('state').textContent = 'navigator.usb missing'; return;
+  }
+  try {
+    // No filter -- show every USB device the OS will offer.
+    const d = await navigator.usb.requestDevice({ filters: [{}] });
+    const info = ['picked USB device:',
+      '  VID=0x' + d.vendorId.toString(16) + ' PID=0x' + d.productId.toString(16),
+      '  product: ' + (d.productName || '(none)'),
+      '  manufacturer: ' + (d.manufacturerName || '(none)'),
+      '  serial: ' + (d.serialNumber || '(none)')];
+    $('state').innerHTML = info.join('<br>');
+  } catch (e) {
+    $('state').innerHTML = 'WebUSB picker err: ' + e.message +
+      '<br><br>If "No device selected": the picker was empty (OS doesn\'t see the C3).' +
+      '<br>If you saw devices listed: tell me what they were.';
+  }
 });
 
 // ─── Send helpers ─────────────────────────────────────────────────────────
