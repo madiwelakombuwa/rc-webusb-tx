@@ -89,6 +89,12 @@ button:disabled { opacity: 0.35; border-color: #40403E; color: #91918D; }
   <button class="led" data-cmd="b" disabled>BLINK</button>
 </div>
 
+<div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; padding:6px 0;">
+  <button id="queryStatus" disabled style="background:#262625; color:#91918D; border:1px solid #40403E; padding:10px; border-radius:8px; font-size:11px; letter-spacing:1px;">QUERY C3 STATUS</button>
+  <button id="clearLog" style="background:#262625; color:#91918D; border:1px solid #40403E; padding:10px; border-radius:8px; font-size:11px; letter-spacing:1px;">CLEAR LOG</button>
+</div>
+<div id="c3log" class="status" style="background:#0d0d0d; border:1px solid #262625; border-radius:6px; max-height:25vh; overflow-y:auto; padding:6px;">C3 responses will appear here…</div>
+
 <div class="status">
   <div>t=<span class="v" id="dt">90</span>
        &nbsp;s=<span class="v" id="ds">90</span>
@@ -126,11 +132,26 @@ async function connect() {
     await port.open({ baudRate: 115200 });
     writer = port.writable.getWriter();
 
-    // Drain reads in the background so the C3 doesn't fill its TX buffer
+    // Capture incoming serial lines from the C3 and surface them in the log
+    let readBuffer = '';
+    const decoder = new TextDecoder();
     (async () => {
       const reader = port.readable.getReader();
-      try { while (true) { const { done } = await reader.read(); if (done) break; } }
-      catch (e) {}
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value) {
+            readBuffer += decoder.decode(value);
+            let nl;
+            while ((nl = readBuffer.indexOf('\n')) >= 0) {
+              const line = readBuffer.substring(0, nl).replace(/\r$/, '');
+              readBuffer = readBuffer.substring(nl + 1);
+              if (line) appendC3Log(line);
+            }
+          }
+        }
+      } catch (e) {}
       finally { reader.releaseLock(); }
     })();
 
@@ -138,6 +159,7 @@ async function connect() {
     $('connect').textContent = 'CONNECTED · TAP TO DISCONNECT';
     $('connect').classList.add('connected');
     document.querySelectorAll('button.led').forEach(b => b.disabled = false);
+    $('queryStatus').disabled = false;
 
     setInterval(() => {
       $('rate').textContent = pktCount - pktCountLastSec;
@@ -158,7 +180,23 @@ async function disconnect() {
   $('connect').textContent = 'CONNECT C3 SERIAL';
   $('connect').classList.remove('connected');
   document.querySelectorAll('button.led').forEach(b => b.disabled = true);
+  $('queryStatus').disabled = true;
 }
+
+function appendC3Log(line) {
+  const el = $('c3log');
+  // Replace placeholder text on first message
+  if (el.textContent === 'C3 responses will appear here…') el.textContent = '';
+  const stamp = new Date().toLocaleTimeString('en-GB', { hour12: false }) + '.' +
+                String(new Date().getMilliseconds()).padStart(3, '0');
+  el.textContent += '[' + stamp + '] ' + line + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+$('queryStatus').addEventListener('click', () => sendLine('?'));
+$('clearLog').addEventListener('click', () => {
+  $('c3log').textContent = '(log cleared)';
+});
 
 $('connect').addEventListener('click', () => {
   if (port) disconnect(); else connect();
