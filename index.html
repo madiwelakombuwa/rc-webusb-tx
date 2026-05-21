@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,maximum-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<title>RC Control (WebUSB)</title>
+<title>RC Control (Web Serial)</title>
 <style>
 :root { color-scheme: dark; }
 * { box-sizing: border-box; }
@@ -63,10 +63,10 @@ button:disabled { opacity: 0.35; border-color: #40403E; color: #91918D; }
 </style>
 </head>
 <body>
-<h2>RC CONTROL · WebUSB</h2>
+<h2>RC CONTROL · Web Serial</h2>
 <div class="sub">Phone ⟶ USB-OTG ⟶ ESP32-C3 ⟶ PPM</div>
 
-<button id="connect" class="connect">CONNECT C3 VIA USB</button>
+<button id="connect" class="connect">CONNECT C3 SERIAL</button>
 
 <div class="row">
   <div>
@@ -90,18 +90,18 @@ button:disabled { opacity: 0.35; border-color: #40403E; color: #91918D; }
   <div>t=<span class="v" id="dt">90</span>
        &nbsp;s=<span class="v" id="ds">90</span>
        &nbsp;pkt/s=<span class="v" id="rate">0</span></div>
-  <div id="state">tap "CONNECT C3 VIA USB" above</div>
+  <div id="state">tap "CONNECT C3 SERIAL" above</div>
 </div>
 
 <script>
-// ─── WebUSB connection ─────────────────────────────────────────────────────
-// C3 SuperMini enumerates as Espressif USB-Serial/JTAG.
-// VID 0x303a (Espressif), PID 0x1001 (ESP32-C3 native USB JTAG/Serial).
-const USB_FILTERS = [{ vendorId: 0x303a, productId: 0x1001 }];
+// ─── Web Serial connection ────────────────────────────────────────────────
+// Web Serial works on Chrome desktop and on Chrome Android (148+, April 2026).
+// Unlike WebUSB, it can claim USB-CDC serial ports (no protected-class block).
+// Optional filter narrows the picker to Espressif chips (VID 0x303a).
+const SERIAL_FILTERS = [{ usbVendorId: 0x303a }];
 
-let device = null;
-let outEndpoint = null;
-let interfaceNumber = null;
+let port = null;
+let writer = null;
 let pktCount = 0, pktCountLastSec = 0;
 
 const $ = (id) => document.getElementById(id);
@@ -112,73 +112,59 @@ const setStatus = (text, cls = '') => {
 };
 
 async function connect() {
-  if (!navigator.usb) {
-    setStatus('WebUSB not supported. Use Chrome on Android.', 'err'); return;
+  if (!('serial' in navigator)) {
+    setStatus('Web Serial not supported in this browser. Use Chrome on Android (v148+) or Chrome desktop.', 'err');
+    return;
   }
   try {
-    device = await navigator.usb.requestDevice({ filters: USB_FILTERS });
-    await device.open();
-    if (device.configuration === null) await device.selectConfiguration(1);
+    port = await navigator.serial.requestPort({ filters: SERIAL_FILTERS });
+    await port.open({ baudRate: 115200 });
+    writer = port.writable.getWriter();
 
-    // Find the CDC-Data interface and its bulk OUT endpoint.
-    // CDC Data class = 0x0A.
-    let cdcData = null;
-    for (const iface of device.configuration.interfaces) {
-      const alt = iface.alternates[0];
-      if (alt.interfaceClass === 0x0A) { cdcData = iface; break; }
-    }
-    // Fallback: take the LAST interface (CDC-Data is usually the last one on the C3 USB-CDC stack).
-    if (!cdcData) {
-      cdcData = device.configuration.interfaces[device.configuration.interfaces.length - 1];
-    }
-    interfaceNumber = cdcData.interfaceNumber;
-    await device.claimInterface(interfaceNumber);
+    // Drain reads in the background so the C3 doesn't fill its TX buffer
+    (async () => {
+      const reader = port.readable.getReader();
+      try { while (true) { const { done } = await reader.read(); if (done) break; } }
+      catch (e) {}
+      finally { reader.releaseLock(); }
+    })();
 
-    const alt = cdcData.alternates[0];
-    for (const ep of alt.endpoints) {
-      if (ep.direction === 'out') { outEndpoint = ep.endpointNumber; break; }
-    }
-    if (!outEndpoint) throw new Error('no bulk OUT endpoint found on CDC-Data interface');
-
-    setStatus(`Connected · iface=${interfaceNumber} epOUT=${outEndpoint}`, 'ok');
+    setStatus('Connected · 115200 baud', 'ok');
     $('connect').textContent = 'CONNECTED · TAP TO DISCONNECT';
     $('connect').classList.add('connected');
     document.querySelectorAll('button.led').forEach(b => b.disabled = false);
 
-    // Per-second packet rate counter
     setInterval(() => {
       $('rate').textContent = pktCount - pktCountLastSec;
       pktCountLastSec = pktCount;
     }, 1000);
   } catch (e) {
     setStatus('Connect failed: ' + e.message, 'err');
-    device = null;
+    port = null;
   }
 }
 
 async function disconnect() {
-  if (!device) return;
   try {
-    if (interfaceNumber !== null) await device.releaseInterface(interfaceNumber);
-    await device.close();
+    if (writer) { writer.releaseLock(); writer = null; }
+    if (port)   { await port.close(); port = null; }
   } catch (e) { /* ignore */ }
-  device = null; outEndpoint = null; interfaceNumber = null;
   setStatus('Disconnected', '');
-  $('connect').textContent = 'CONNECT C3 VIA USB';
+  $('connect').textContent = 'CONNECT C3 SERIAL';
   $('connect').classList.remove('connected');
   document.querySelectorAll('button.led').forEach(b => b.disabled = true);
 }
 
 $('connect').addEventListener('click', () => {
-  if (device) disconnect(); else connect();
+  if (port) disconnect(); else connect();
 });
 
 // ─── Send helpers ─────────────────────────────────────────────────────────
 const encoder = new TextEncoder();
 async function sendLine(line) {
-  if (!device || !outEndpoint) return;
+  if (!writer) return;
   try {
-    await device.transferOut(outEndpoint, encoder.encode(line + '\n'));
+    await writer.write(encoder.encode(line + '\n'));
     pktCount++;
   } catch (e) {
     setStatus('TX err: ' + e.message, 'err');
@@ -234,10 +220,9 @@ setInterval(() => {
   const s = Math.round(90 + steeringX * 90);
   $('dt').textContent = t;
   $('ds').textContent = s;
-  if (!device) return;
+  if (!writer) return;
   const now = performance.now();
   const changed = (t !== lastSent.t) || (s !== lastSent.s);
-  // Send on change at up to ~50 Hz, OR heartbeat at 5 Hz
   if ((changed && now - lastSendMs > 20) || now - lastSendMs > 200) {
     sendLine(`${t} ${s}`);
     lastSent = { t, s };
