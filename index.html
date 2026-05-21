@@ -54,8 +54,9 @@ button:disabled { opacity: 0.35; border-color: #40403E; color: #91918D; }
 }
 .connect.connected { background: #262625; color: #91918D; border: 1px solid #91918D; }
 .status {
-  text-align: center; padding: 8px; color: #91918D; font-size: 11px;
-  font-family: Menlo, monospace; line-height: 1.6;
+  text-align: left; padding: 8px; color: #91918D; font-size: 11px;
+  font-family: Menlo, monospace; line-height: 1.4;
+  max-height: 30vh; overflow-y: auto;
 }
 .status .v { color: #FAFAF7; }
 .status .ok { color: #6FB07F; }
@@ -67,6 +68,7 @@ button:disabled { opacity: 0.35; border-color: #40403E; color: #91918D; }
 <div class="sub">Phone ⟶ USB-OTG ⟶ ESP32-C3 ⟶ PPM</div>
 
 <button id="connect" class="connect">CONNECT C3 SERIAL</button>
+<button id="probe" style="width:100%; background:#262625; color:#91918D; border:1px solid #40403E; padding:8px; border-radius:8px; font-size:11px; letter-spacing:1px; margin-bottom:8px;">DEBUG: WHAT DOES CHROME SEE?</button>
 
 <div class="row">
   <div>
@@ -97,8 +99,8 @@ button:disabled { opacity: 0.35; border-color: #40403E; color: #91918D; }
 // ─── Web Serial connection ────────────────────────────────────────────────
 // Web Serial works on Chrome desktop and on Chrome Android (148+, April 2026).
 // Unlike WebUSB, it can claim USB-CDC serial ports (no protected-class block).
-// Optional filter narrows the picker to Espressif chips (VID 0x303a).
-const SERIAL_FILTERS = [{ usbVendorId: 0x303a }];
+// NOTE: do NOT use filters on Android -- the picker is stricter there and may
+// hide otherwise-valid devices. Show ALL serial ports; user picks manually.
 
 let port = null;
 let writer = null;
@@ -117,7 +119,9 @@ async function connect() {
     return;
   }
   try {
-    port = await navigator.serial.requestPort({ filters: SERIAL_FILTERS });
+    // No filters -- show every serial port Chrome can see.
+    // On Android Chrome the picker is sometimes empty if filters are too tight.
+    port = await navigator.serial.requestPort();
     await port.open({ baudRate: 115200 });
     writer = port.writable.getWriter();
 
@@ -157,6 +161,41 @@ async function disconnect() {
 
 $('connect').addEventListener('click', () => {
   if (port) disconnect(); else connect();
+});
+
+// ─── Debug probe: list permission-granted serial ports + capabilities ─────
+$('probe').addEventListener('click', async () => {
+  const lines = [];
+  lines.push('userAgent: ' + navigator.userAgent.slice(0, 60));
+  lines.push('serial in nav: ' + ('serial' in navigator));
+  lines.push('usb    in nav: ' + ('usb' in navigator));
+  if ('serial' in navigator) {
+    try {
+      const ports = await navigator.serial.getPorts();
+      lines.push('pre-granted ports: ' + ports.length);
+      ports.forEach((p, i) => {
+        try {
+          const info = p.getInfo();
+          lines.push('  [' + i + '] VID=0x' + info.usbVendorId?.toString(16) +
+                          ' PID=0x' + info.usbProductId?.toString(16));
+        } catch (e) { lines.push('  [' + i + '] (getInfo err: ' + e.message + ')'); }
+      });
+    } catch (e) { lines.push('getPorts err: ' + e.message); }
+  }
+  if ('usb' in navigator) {
+    try {
+      const devs = await navigator.usb.getDevices();
+      lines.push('pre-granted USB devs: ' + devs.length);
+      devs.forEach((d, i) => {
+        lines.push('  [' + i + '] VID=0x' + d.vendorId?.toString(16) +
+                        ' PID=0x' + d.productId?.toString(16) +
+                        ' "' + (d.productName || '') + '"');
+      });
+    } catch (e) { lines.push('usb getDevices err: ' + e.message); }
+  }
+  setStatus(lines.join('\\n'));
+  // Also render multi-line in the status box
+  $('state').innerHTML = lines.join('<br>');
 });
 
 // ─── Send helpers ─────────────────────────────────────────────────────────
